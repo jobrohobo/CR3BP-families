@@ -6,118 +6,129 @@ Created on Mon May 23 13:46:00 2016
 """
 import time #this is only for tic/toc-style functionality while debugging
 import numpy as np
-from cr3bp_functions import cr3bp_eom, libration_points, Lyap_vel_guess
-from scipy.integrate import ode
+from cr3bp_functions import libration_points, Lyap_vel_guess, target_orbit, check_eigenvalues
 import matplotlib.pyplot as plt
-start = time.time()
-import warnings
-warnings.filterwarnings("ignore")
+import sys
+Start = time.time()
 
 #constants and characteristic properties
 G = 6.67408e-20 #km^3/kg/s^2
-mass1 = 132712200000/G #kg, sun
-mass2 = 398600.441800/G #kg, earth
-m_star = mass1 + mass2
-l_star = 149587457#km, earth sma around sun
-t_star = np.sqrt(l_star**3/(G*m_star))
-mu = mass2/m_star
+Mass1 = 132712200000/G #kg, sun
+Mass2 = 398600.441800/G #kg, earth
+MStar = Mass1 + Mass2
+LStar = 149587457#km, earth sma around sun
+TStar = np.sqrt(LStar**3/(G*MStar))
+mu = Mass2/MStar
 
 #inputs
-family_members = 200
-x_start = -0.0001 #nondim, first step away from libration point (negative for L1, positive for L2)
-x_step = -0.000005 #nondim, all subsequent steps between family members (negative for L1, positive for L2)
-x_step_delta = -0.0000001 #nondim
-backend_bigprop = 'vode'
-backend_littleprop = 'dopri5' #can't use vode with two solvers simultaneously
-tol_converge = 1e-10 #nondim
-tol_integrate = 1e-12 #nondim
-tol_step = 1e-8 #nondim, smallest integration step
-final_crossing = 1
+FamilyMembers = 1000
+PercentToPlot = 2 #saves and plots x% of the orbits generated; others are not saved to limit memory usage 
+XStart = -0.0001 #nondim, first step away from libration point (negative for L1, positive for L2)
+XStep = -0.000005 #nondim, all subsequent steps between family members (negative for L1, positive for L2)
+BackendBigprop = 'vode'
+BackendLittleprop = 'dopri5' #can't use vode with two solvers simultaneously
+TolConverge = 1e-10 #nondim
+TolIntegrate = 1e-12 #nondim
+TolStep = 1e-8 #nondim, smallest integration step
+TolEig = 1e-3 #if imaginary component of eigenvalue is less than this, it will be set to 0
+FinalCrossing = 2 #1 for half rev, 2 for full rev
 t0 = 0
 tf = 10
-#array to store converged orbit
-lyapunovs = []
 #find libration point positions/energies
-lpstuff = libration_points(mu)
-vy_guess = Lyap_vel_guess(lpstuff[0][0],lpstuff[1][0],mu,x_start)
-plt.plot(lpstuff[0][0],lpstuff[1][0],'.') #plot L1
+LibrationPointParams = libration_points(mu)
+VyGuess = Lyap_vel_guess(LibrationPointParams[0][0],LibrationPointParams[1][0],mu,XStart)
 STM0 = np.reshape(np.eye(6),36)
-#set integrators
-bigprop = ode(cr3bp_eom).set_integrator(backend_bigprop,atol=tol_integrate,rtol=tol_integrate)
-littleprop = ode(cr3bp_eom).set_integrator(backend_littleprop,atol=tol_integrate,rtol=tol_integrate)
-for member in range(0,family_members):
+#array to store converged orbit
+Lyapunovs = []
+#create lypunov orbits
+for Member in range(0,FamilyMembers):
     #initial conditions
-    x_step = x_step + x_step_delta
-    state0 = [lpstuff[0][0]+x_start+x_step*member,0,0,0,vy_guess,0]
-    x0 = np.concatenate((state0, STM0),axis=1)
-    for target_crossing in range(1,final_crossing+1):
-        error = 1
-        while np.abs(error) > tol_converge:
-            #integrate
-            bigprop.set_initial_value(x0,t0).set_f_params(mu)
-            t = [t0]
-            x = [x0[0]]
-            y = [x0[1]]
-            z = [x0[2]]
-            current_crossing = 0
-            last_y = np.sign(x0[4])
-            while bigprop.successful() and current_crossing < target_crossing:
-                #step
-                current_state = bigprop.integrate(tf,step=True)
-                #check for crossing
-                if np.sign(current_state[1]) != np.sign(last_y):
-                    current_crossing += 1
-                    #littleprop to find actual crossing
-                    dt = (t[-1]-t[-2])
-                    while np.abs(current_state[1]) > tol_converge and abs(dt) > tol_step:
-                        dt = -dt/2
-                        last_y = current_state[1]
-                        littleprop.set_initial_value(current_state,bigprop.t).set_f_params(mu)
-                        current_state = littleprop.integrate(littleprop.t+dt)
-                        #take another step if we didn't cross on the first one
-                        if np.sign(current_state[1]) == np.sign(last_y):
-                            current_state = littleprop.integrate(littleprop.t+dt)
-                    #save correct time
-                    t.append(littleprop.t)
-                else:
-                    #save correct time
-                    t.append(bigprop.t)
-                #save data to arrays
-                x.append(current_state[0])
-                y.append(current_state[1])
-                z.append(current_state[2])
-                last_y = current_state[1]
-#            #plot
-#            plt.plot(x,y,'.-')
-            #update initial conditions
-            error = current_state[3]
-            #simple
-#            dvy = error/current_state[28]
-#            print error,dvy
-#            x0[4] = x0[4] - dvy
-            #intermediate
-            r1 = np.sqrt( (current_state[0]+mu)**2 + current_state[1]**2 + current_state[2]**2 )
-            r2 = np.sqrt( (current_state[0]-1+mu)**2 + current_state[1]**2 + current_state[2]**2 )
-            ax = 2*current_state[4] + current_state[0] - (1-mu)*(current_state[0]+mu)/r1**3 - mu*(current_state[0]-1+mu)/r2**3
-            dvy = (current_state[4]*error)/(current_state[28]*current_state[4]-current_state[16]*ax)
-            #dvy = current_state[4]/ax*current_state[3]/(current_state[4]/ax*current_state[28]-current_state[16])
-#            print member,target_crossing,error,dvy,time.time()-start
-            x0[4] = x0[4] - dvy
-            #matrix
-#            X = np.array([[current_state[4]],[r.t]])
-#            FX = np.array([[current_state[1]],[current_state[3]]])
-#            DF = np.array([[current_state[16],current_state[4]],[current_state[28],ax]])
-#            update = np.zeros((2,1))
-#            update = np.mat(X) - np.mat(np.transpose(DF))*np.linalg.inv(np.mat(DF)*np.mat(np.transpose(DF)))*np.mat(FX)
-#            print error, update[0]-X[0]
-#            x0[4] = update[0]
-            
-    #save converged orbit
-    lyapunovs.append([t,x,y,z])
-    #output
-    print member,time.time()-start
-    plt.plot(lyapunovs[-1][1],lyapunovs[-1][2],'g-')
-    plt.plot(lyapunovs[-1][1],[-1*i for i in lyapunovs[-1][2]],'g-')
+    State0 = [LibrationPointParams[0][0]+XStart+XStep*Member,0,0,0,VyGuess,0]
+    x0 = np.concatenate((State0, STM0),axis=1)
+    #call targeter to compute orbit
+    for target_crossing in range(1,FinalCrossing+1):
+        t,x = target_orbit(target_crossing,x0,t0,tf,mu,BackendBigprop,BackendLittleprop,TolIntegrate,TolStep,TolConverge)
+    #save desired percentage of converged orbit
+    if Member % (100/PercentToPlot) == 0:
+        Lyapunovs.append([t,x])
+    #report
+    print Member,time.time() - Start
     #update guess for next member in family
-    vy_guess = x0[4]
-print time.time()-start
+    VyGuess = x[0][4]
+
+#find rough bifurcation locations
+if FinalCrossing == 2:
+    Index = 0
+    Eigenstructure = []
+    BifurcationIndices = []
+    for Member in Lyapunovs:
+        M = np.reshape(Member[1][-1][6:43],(6,6)) #monodromy matrix is STM after 1 rev
+        Eigval,Eigvec = np.linalg.eig(M)
+        #get rid of numerical errors in imaginary components of eigenvalues
+        Eigval = check_eigenvalues(Eigval,TolEig)
+        Eigenstructure.append([Eigval,Eigvec])
+        #find orbit indices where stability (number of real eigenvalues) changes
+        if Index != 0:
+            if np.count_nonzero(np.isreal(Eigenstructure[-1][0])) != np.count_nonzero(np.isreal(Eigenstructure[-2][0])):
+                BifurcationIndices.append(Index-1) #save index of inner orbit
+        #increment index
+        Index += 1
+
+#bisection to find exact bifurcations
+for i in range(len(BifurcationIndices)):
+    Index = BifurcationIndices[i] + 1*i #because we are injecting the orbits found here into Lyapunovs list, we have to increase the index because the bifurcations will move
+    TrajLower = Lyapunovs[Index]
+    TrajUpper = Lyapunovs[Index+1]
+    EigvalLower = Eigenstructure[Index][0]
+    EigvalUpper = Eigenstructure[Index+1][0]
+#    Diff = 1
+#    while Diff > TolConverge:
+    for Counter in range(0,10): #probably close enough after 10 times...but should really use a while loop....
+        #target intermediate orbit
+        state0 = [(TrajUpper[1][0][0]+TrajLower[1][0][0])/2,0,0,0,(TrajUpper[1][0][4]+TrajLower[1][0][4])/2,0]
+        x0 = np.concatenate((state0, STM0),axis=1)
+        for target_crossing in range(1,FinalCrossing+1):
+            t,x = target_orbit(target_crossing,x0,t0,tf,mu,BackendBigprop,BackendLittleprop,TolIntegrate,TolStep,TolConverge)
+        #eigenvalues
+        M = np.reshape(x[-1][6:43],(6,6))
+        Eigval,Eigvec = np.linalg.eig(M)
+        Eigval = check_eigenvalues(Eigval,TolEig)
+        #compare eigenvalues, set new upper or lower as appropriate
+        if np.count_nonzero(np.isreal(Eigval)) == np.count_nonzero(np.isreal(EigvalLower)):
+            TrajLower = [t,x]
+            EigvalLower = Eigval
+        elif np.count_nonzero(np.isreal(Eigval)) == np.count_nonzero(np.isreal(EigvalUpper)):
+            TrajUpper = [t,x]
+            EigvalUpper = Eigval
+        else:
+            sys.exit("Eigenvalues did not match either lower or upper trajectories")
+    #insert bifurcation orbit into saved family
+    Lyapunovs.insert(Index+1,[t,x])
+    Eigenstructure.insert(Index+1,[Eigval,Eigvec])
+    #update bifurcation index
+    BifurcationIndices[i] = Index+1
+
+#plot
+fig = plt.figure()
+ax = fig.add_subplot(111)
+L1Label, = ax.plot(LibrationPointParams[0][0],LibrationPointParams[1][0],'.') #plot L1
+BifurcationIndex = 0
+for i in range(len(Lyapunovs)):
+    x,y = [],[]
+    for j in range(len(Lyapunovs[i][1])):
+        x.append(Lyapunovs[i][1][j][0])
+        y.append(Lyapunovs[i][1][j][1])    
+    LyapunovsLabel, = ax.plot(x,y,'g-')
+    if BifurcationIndex < len(BifurcationIndices):
+        if i == BifurcationIndices[BifurcationIndex]:
+            BifurcationsLabel, = ax.plot(x,y,'k-',linewidth=2)
+            BifurcationIndex += 1
+    if FinalCrossing == 1:
+        MirrorLabel, = ax.plot(x,[-1*k for k in y],'g-')
+ax.axis('equal')
+fig.show()
+
+#cleanup
+del x
+del y
+print time.time()-Start

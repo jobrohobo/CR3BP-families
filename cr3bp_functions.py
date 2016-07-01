@@ -6,13 +6,16 @@ Created on Mon May 23 15:45:20 2016
 """
 
 import numpy as np
+from scipy.integrate import ode
+import matplotlib.pyplot as plt
 
 # equations of motion
 def cr3bp_eom(t,stateSTM,mu):
     '''
-    stateSTM is a 42 element array; the first 6 elements contain the 
-    non-dimensionalized, rotating position and velocity; the remaining elements
-    are the state transition matrix. mu is the mass ratio of the two primaries
+    stateSTM = 42 element array; the first 6 elements contain the 
+        non-dimensionalized, rotating position and velocity; the remaining 
+        elements are the state transition matrix. 
+    mu = mass ratio of the two primaries
     '''
     #intermediate variables
     x = stateSTM[0]
@@ -59,8 +62,8 @@ def cr3bp_eom(t,stateSTM,mu):
 # Jacobi constant
 def Jacobi(mu,state):
     '''
-    mu is the mass ratio of the two primaries, state is the non-dimesionalized
-    rotating position and velocity
+    mu = mass ratio of the two primaries
+    state = non-dimesionalized rotating position and velocity
     '''    
     #array variables
     x = state[0]
@@ -79,7 +82,7 @@ def Jacobi(mu,state):
 # libration point positions and energies
 def libration_points(mu):
     '''
-    mu is the mass ratio of the two primaries
+    mu = mass ratio of the two primaries
     '''
     tol = 1e-12
     x,y,C = [],[],[]
@@ -138,9 +141,9 @@ def libration_points(mu):
 #Lyapunov guess for initial velocity
 def Lyap_vel_guess(Lx,Ly,mu,x):
     '''
-    Lx and Ly are the nondimensionalized position of the libration point, mu is
-    the mass ratio of the two primaries, x is the displacement from the 
-    libration point of the initial condition (assumes y = z = 0)
+    Lx, Ly = nondimensionalized position of the libration point
+    mu = mass ratio of the two primaries
+    x = displacement from the libration point of the initial condition (assumes y = z = 0)
     '''
     r1 = np.sqrt((Lx+mu)**2 + Ly**2)
     r2 = np.sqrt((Lx-1+mu)**2 + Ly**2)
@@ -155,3 +158,88 @@ def Lyap_vel_guess(Lx,Ly,mu,x):
     
     vy = -B3*x*s
     return vy    
+    
+#target orbit which achieves perpendicular crossing
+def target_orbit(target_crossing,x0,t0,tf,mu,backend_bigprop,backend_littleprop,tol_integrate,tol_step,tol_converge):
+    '''
+    target_crossing = nth crossing to target a perpendicular crossing
+    x0 = 42 element initial state; the first 6 elements contain the 
+        non-dimensionalized, rotating position and velocity; the remaining 
+        elements are the state transition matrix.
+    t0 = initial time
+    tf = final time (this is typically going to be larger than the actual 
+        desired propagation time)
+    mu = mass ratio of the two primaries
+    backend_bigprop = integrator to use when taking large steps
+    backend_littleprop = integrator to use when bisecting the crossing (if 
+        bigprop uses vode, this must use a different integrator)
+    tol_integrate = integration tolerance
+    tol_step = smallest step size that the integrator will use
+    tol_converge = tolerance to determine whether crossing is perpendicular
+    '''
+    bigprop = ode(cr3bp_eom).set_integrator(backend_bigprop,atol=tol_integrate,rtol=tol_integrate)
+    littleprop = ode(cr3bp_eom).set_integrator(backend_littleprop,atol=tol_integrate,rtol=tol_integrate)
+    error = 1
+    iteration = 0
+    while np.abs(error) > tol_converge:
+        #integrate
+        bigprop.set_initial_value(x0,t0).set_f_params(mu)
+        t = [t0]
+        x = [x0]
+        current_crossing = 0
+        last_y = np.sign(x0[4])
+        while bigprop.successful() and current_crossing < target_crossing:
+            #step
+            current_state = bigprop.integrate(tf,step=True)
+            #check for crossing
+            if np.sign(current_state[1]) != np.sign(last_y):
+                current_crossing += 1
+                #littleprop to find actual crossing
+                if current_crossing == target_crossing:
+                    dt = (t[-1]-t[-2])
+                    while np.abs(current_state[1]) > tol_converge and abs(dt) > tol_step:
+                        dt = -dt/2
+                        last_y = current_state[1]
+                        littleprop.set_initial_value(current_state,bigprop.t).set_f_params(mu)
+                        current_state = littleprop.integrate(littleprop.t+dt)
+                        #take another step if we didn't cross on the first one
+                        if np.sign(current_state[1]) == np.sign(last_y):
+                            current_state = littleprop.integrate(littleprop.t+dt)
+                #save correct time
+                t.append(littleprop.t)
+            else:
+                #save correct time
+                t.append(bigprop.t)
+            #save data to arrays
+            x.append(current_state)
+            last_y = current_state[1]
+        #targeting algorithm to update initial conditions
+        error = current_state[3]
+        r1 = np.sqrt( (current_state[0]+mu)**2 + current_state[1]**2 + current_state[2]**2 )
+        r2 = np.sqrt( (current_state[0]-1+mu)**2 + current_state[1]**2 + current_state[2]**2 )
+        ax = 2*current_state[4] + current_state[0] - (1-mu)*(current_state[0]+mu)/r1**3 - mu*(current_state[0]-1+mu)/r2**3
+        X = np.array([[x0[4]],[t[len(t)-1]]])
+        FX = np.array([[current_state[1]],[current_state[3]]])
+        DF = np.array([[current_state[16],current_state[4]],[current_state[28],ax]])
+        update = np.zeros((2,1))
+        update = np.mat(X) - np.mat(np.transpose(DF))*np.linalg.inv(np.mat(DF)*np.mat(np.transpose(DF)))*np.mat(FX)
+        x0[4] = update[0]
+        #increase perpendicular crossing tolerance if stuck
+        if iteration > 10:
+            tol_converge = 10*tol_converge
+            iteration = -1
+        iteration += 1
+        
+    return t,x
+
+#check imaginary components of eigenvalues, and set to 0 if below tolerance
+def check_eigenvalues(eigval,tol_eig):
+    '''
+    eigval = list of eigenvalues
+    tol_eig = tolerance for imaginary component of eigenvalues; anything less 
+        will be set to 0
+    '''
+    for i in range(len(eigval)):
+        if np.abs(np.imag(eigval[i])) < tol_eig:
+            eigval[i] = np.real(eigval[i])
+    return eigval
